@@ -1,0 +1,128 @@
+# ==============================================================================
+# Git Ignore for Apache Kafka, Spark, Flink, Python & ML Research Workspace
+# ==============================================================================
+
+# --- Python & Virtual Environments ---
+venv/
+.venv/
+env/
+.env
+ENV/
+env.bak/
+venv.bak/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Pytest, Coverage & Linting ---
+.pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# --- Apache Kafka Logs & State Files ---
+/tmp/kafka-logs/
+/tmp/zookeeper/
+/tmp/kraft-combined-logs/
+kafka-logs/
+kraft-logs/
+*.snapshot
+*.index
+*.timeindex
+*.log
+*.meta
+meta.properties
+.lock
+recovery-point-offset-checkpoint
+replication-offset-checkpoint
+cleaner-offset-checkpoint
+log-cleaner.log
+server.log
+controller.log
+state-change.log
+kafka-request.log
+kafka-authorizer.log
+
+# --- Apache Spark & Hadoop ---
+metastore_db/
+derby.log
+spark-warehouse/
+.spark-staging/
+checkpoint/
+checkpoints/
+spark-checkpoints/
+*.crc
+.events*
+
+# --- Apache Flink ---
+flink-checkpoints/
+flink-savepoints/
+.flink/
+flink-logs/
+log/
+
+# --- Large Datasets & Compressed Files ---
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+Datasets/
+*.csv
+*.parquet
+*.arrow
+
+# --- Machine Learning Models & Heavy Artifacts ---
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.pt
+*.pth
+*.onnx
+
+# --- IDEs, Editors & OS Files ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# --- PDF Deliverables / Generated Reports (Optional to track or ignore) ---
+*.tmp
+*.bak

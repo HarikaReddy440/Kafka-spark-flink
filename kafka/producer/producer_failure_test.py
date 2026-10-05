@@ -1,31 +1,33 @@
+import argparse
 import json
+import os
+import sys
 import time
-
+from pathlib import Path
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
+generator_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "transaction_generator")
+)
+sys.path.append(generator_path)
+from dataset_loader import DatasetTransactionStreamer
 
 BROKER = "localhost:9092"
-TOPIC = "producer_failure_test"
-
-TOTAL_MESSAGES = 300
-INTERVAL = 0.5
-
-
-def create_transaction(number):
-    return {
-        "transaction_id": f"FAIL-{number:04d}",
-        "card_id": f"CARD-{number % 10}",
-        "amount": round(100 + number * 5.25, 2),
-        "merchant_id": f"M{100 + (number % 10)}",
-        "timestamp": time.time(),
-        "device_type": ["mobile", "web", "pos"][number % 3],
-        "country": ["IN", "US", "UK", "AE"][number % 4],
-        "sequence": number
-    }
+DEFAULT_TOPIC = "producer_failure_test"
+DEFAULT_TOTAL_MESSAGES = 100
+DEFAULT_INTERVAL = 0.2
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Kafka Producer Failure & Retry Test (Dataset-Driven)")
+    parser.add_argument("--topic", default=DEFAULT_TOPIC)
+    parser.add_argument("--count", type=int, default=DEFAULT_TOTAL_MESSAGES)
+    parser.add_argument("--interval", type=float, default=DEFAULT_INTERVAL)
+    parser.add_argument("--dataset", default="default")
+
+    args = parser.parse_args()
+    streamer = DatasetTransactionStreamer(dataset_path=args.dataset, loop=True)
 
     producer = KafkaProducer(
         bootstrap_servers=[BROKER],
@@ -36,71 +38,62 @@ def main():
         retry_backoff_ms=500,
         request_timeout_ms=3000,
         delivery_timeout_ms=10000,
-        enable_idempotence=True
+        enable_idempotence=True,
     )
 
     successful = 0
     failed = 0
 
-    print("=" * 70)
-    print("KAFKA PRODUCER FAILURE / RETRY TEST")
-    print("=" * 70)
+    print("=" * 80)
+    print("KAFKA PRODUCER FAILURE & RETRY RECOVERY TEST (DATASET-POWERED)")
+    print("=" * 80)
     print(f"Broker           : {BROKER}")
-    print(f"Topic            : {TOPIC}")
-    print(f"Total messages   : {TOTAL_MESSAGES}")
-    print(f"Message interval : {INTERVAL} seconds")
+    print(f"Topic            : {args.topic}")
+    print(f"Dataset          : {streamer.dataset_file or 'Synthetic'}")
+    print(f"Total messages   : {args.count}")
+    print(f"Message interval : {args.interval} seconds")
     print("ACK mode         : all")
     print("Retries          : 5")
     print("Idempotence      : enabled")
-    print("=" * 70)
+    print("=" * 80)
     print()
 
-    for i in range(1, TOTAL_MESSAGES + 1):
-
-        transaction = create_transaction(i)
+    for i in range(1, args.count + 1):
+        transaction = streamer.next_transaction()
+        key = str(transaction.get("card_id", "CARD-0"))
 
         try:
-
-            future = producer.send(
-                TOPIC,
-                key=transaction["card_id"],
-                value=transaction
-            )
-
+            future = producer.send(args.topic, key=key, value=transaction)
             metadata = future.get(timeout=10)
-
             successful += 1
 
             print(
-                f"SUCCESS | "
-                f"Transaction={transaction['transaction_id']} | "
-                f"Partition={metadata.partition} | "
+                f"[{i}/{args.count}] SUCCESS | "
+                f"TX={transaction['transaction_id']} | "
+                f"Card={key} | "
+                f"Amt=${transaction.get('amount', 0):.2f} | "
+                f"Part={metadata.partition} | "
                 f"Offset={metadata.offset}"
             )
 
         except KafkaError as error:
-
             failed += 1
+            print(f"[{i}/{args.count}] FAILED  | TX={transaction['transaction_id']} | Error={error}")
 
-            print(
-                f"FAILED  | "
-                f"Transaction={transaction['transaction_id']} | "
-                f"Error={error}"
-            )
-
-        time.sleep(INTERVAL)
+        time.sleep(args.interval)
 
     producer.flush()
     producer.close()
+    streamer.close()
 
     print()
-    print("=" * 70)
+    print("=" * 80)
     print("PRODUCER FAILURE TEST RESULTS")
-    print("=" * 70)
-    print(f"Messages attempted : {TOTAL_MESSAGES}")
+    print("=" * 80)
+    print(f"Messages attempted : {args.count}")
     print(f"Successful         : {successful}")
     print(f"Failed             : {failed}")
-    print("=" * 70)
+    print("=" * 80)
 
 
 if __name__ == "__main__":

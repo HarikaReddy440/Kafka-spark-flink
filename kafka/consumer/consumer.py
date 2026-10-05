@@ -1,126 +1,116 @@
-from kafka import KafkaConsumer
+import argparse
 import json
+import sys
 import time
 
+# Ensure stdout handles Windows console encoding safely
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
-# --------------------------------------------------
-# Kafka Configuration
-# --------------------------------------------------
+from kafka import KafkaConsumer
 
-BOOTSTRAP_SERVERS = "localhost:9092"
-TOPIC = "transactions"
-GROUP_ID = "fraud-detector-group"
+DEFAULT_BROKER = "localhost:9092"
+DEFAULT_TOPIC = "transactions"
+DEFAULT_GROUP = "fraud-detector-group"
 
 
-# --------------------------------------------------
-# Create Kafka Consumer
-# --------------------------------------------------
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Dataset-Compatible Real-Time Kafka Consumer")
+    parser.add_argument("--broker", default=DEFAULT_BROKER, help=f"Kafka broker (default: {DEFAULT_BROKER})")
+    parser.add_argument("--topic", default=DEFAULT_TOPIC, help=f"Kafka topic (default: {DEFAULT_TOPIC})")
+    parser.add_argument("--group", default=DEFAULT_GROUP, help=f"Consumer group (default: {DEFAULT_GROUP})")
+    parser.add_argument("--max-messages", type=int, default=0, help="Stop after N messages (0 for continuous)")
+    return parser.parse_args()
 
-consumer = KafkaConsumer(
-    TOPIC,
 
-    bootstrap_servers=BOOTSTRAP_SERVERS,
+def extract_field(tx, keys, default=None):
+    for k in keys:
+        if k in tx and tx[k] is not None:
+            return tx[k]
+    return default
 
-    # Consumer group
-    group_id=GROUP_ID,
 
-    # If this group has no committed offset,
-    # start from the beginning of the topic
-    auto_offset_reset="earliest",
+def main():
+    args = parse_arguments()
 
-    # We will commit offsets manually
-    enable_auto_commit=False,
-
-    # Convert JSON bytes → Python dictionary
-    value_deserializer=lambda value: json.loads(
-        value.decode("utf-8")
-    ),
-
-    # Convert key bytes → string
-    key_deserializer=lambda key: (
-        key.decode("utf-8") if key else None
+    consumer = KafkaConsumer(
+        args.topic,
+        bootstrap_servers=[args.broker],
+        group_id=args.group,
+        auto_offset_reset="earliest",
+        enable_auto_commit=False,
+        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+        key_deserializer=lambda k: k.decode("utf-8") if k else None,
     )
-)
+
+    processed_count = 0
+    unique_transactions = set()
+    duplicate_count = 0
+    fraud_detected = 0
+
+    print("=" * 80)
+    print("KAFKA DATASET CONSUMER")
+    print("=" * 80)
+    print(f"Broker       : {args.broker}")
+    print(f"Topic        : {args.topic}")
+    print(f"Consumer ID  : {args.group}")
+    print(f"Max Messages : {'Unlimited' if args.max_messages == 0 else args.max_messages}")
+    print("=" * 80)
+    print("\nWaiting for real-time transactions...\n")
+
+    try:
+        for message in consumer:
+            tx = message.value
+
+            tx_id = str(extract_field(tx, ["transaction_id", "TransactionID", "id"], f"OFFSET-{message.offset}"))
+            card_id = str(extract_field(tx, ["card_id", "card1", "account_id"], message.key or "UNKNOWN"))
+            amount = extract_field(tx, ["amount", "TransactionAmt", "amt"], 0.0)
+            is_fraud = extract_field(tx, ["is_fraud", "isFraud"], False)
+            source = extract_field(tx, ["dataset_source", "source"], "dataset")
+
+            processed_count += 1
+
+            if tx_id in unique_transactions:
+                duplicate_count += 1
+                print(f"[!] DUPLICATE DETECTED: {tx_id} | Partition: {message.partition} | Offset: {message.offset}")
+            else:
+                unique_transactions.add(tx_id)
+                if is_fraud:
+                    fraud_detected += 1
+                
+                status_tag = "[FRAUD]" if is_fraud else "[OK]"
+                print(
+                    f"[{processed_count}] {status_tag:<7} | "
+                    f"ID: {tx_id} | "
+                    f"Card: {card_id} | "
+                    f"Amt: ${float(amount):.2f} | "
+                    f"Src: {source} | "
+                    f"Part: {message.partition} | "
+                    f"Off: {message.offset}"
+                )
+
+            # Commit offset after successful delivery
+            consumer.commit()
+
+            if args.max_messages > 0 and processed_count >= args.max_messages:
+                break
+
+    except KeyboardInterrupt:
+        print("\nConsumer stopped by user.")
+    finally:
+        consumer.close()
+        print("\n" + "=" * 80)
+        print("CONSUMER SUMMARY")
+        print("=" * 80)
+        print(f"Total Processed     : {processed_count}")
+        print(f"Unique Transactions : {len(unique_transactions)}")
+        print(f"Duplicate Events    : {duplicate_count}")
+        print(f"Fraudulent Events   : {fraud_detected}")
+        print("=" * 80)
 
 
-# --------------------------------------------------
-# Consumer Statistics
-# --------------------------------------------------
-
-processed_count = 0
-unique_transactions = set()
-duplicate_count = 0
-
-
-print("Kafka Consumer started...")
-print(f"Topic       : {TOPIC}")
-print(f"Consumer ID : {GROUP_ID}")
-print("\nWaiting for transactions...\n")
-
-
-try:
-
-    for message in consumer:
-
-        transaction = message.value
-
-        transaction_id = transaction.get("transaction_id")
-
-        processed_count += 1
-
-        # --------------------------------------------------
-        # Duplicate detection
-        # --------------------------------------------------
-
-        if transaction_id in unique_transactions:
-
-            duplicate_count += 1
-
-            print(
-                f"DUPLICATE: {transaction_id}"
-            )
-
-        else:
-
-            unique_transactions.add(transaction_id)
-
-            print(
-                f"[{processed_count}] "
-                f"Received: {transaction_id} | "
-                f"Card: {transaction.get('card_id')} | "
-                f"Amount: {transaction.get('amount')} | "
-                f"Partition: {message.partition} | "
-                f"Offset: {message.offset}"
-            )
-
-        # --------------------------------------------------
-        # Simulated transaction processing
-        # --------------------------------------------------
-
-        time.sleep(0.05)
-
-        # --------------------------------------------------
-        # Manual offset commit
-        # --------------------------------------------------
-
-        consumer.commit()
-
-
-except KeyboardInterrupt:
-
-    print("\nConsumer stopped by user.")
-
-
-finally:
-
-    consumer.close()
-
-    print("\n----------------------------------------")
-    print("Consumer Summary")
-    print("----------------------------------------")
-    print(f"Messages processed : {processed_count}")
-    print(f"Unique messages    : {len(unique_transactions)}")
-    print(f"Duplicates         : {duplicate_count}")
-    print("----------------------------------------")
-
-
+if __name__ == "__main__":
+    main()

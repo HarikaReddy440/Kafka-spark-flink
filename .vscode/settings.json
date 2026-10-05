@@ -1,0 +1,14 @@
+{
+  "python.analysis.extraPaths": [
+    "./kafka/transaction_generator",
+    "./kafka/producer",
+    "./kafka/consumer",
+    "./kafka"
+  ],
+  "python.autoComplete.extraPaths": [
+    "./kafka/transaction_generator",
+    "./kafka/producer",
+    "./kafka/consumer",
+    "./kafka"
+  ]
+}

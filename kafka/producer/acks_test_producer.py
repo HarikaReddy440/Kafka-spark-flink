@@ -1,209 +1,131 @@
 import argparse
 import json
-import time
+import os
 import statistics
-
+import sys
+import time
+from pathlib import Path
 from kafka import KafkaProducer
 
+generator_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "transaction_generator")
+)
+sys.path.append(generator_path)
+from dataset_loader import DatasetTransactionStreamer
 
 BROKER = "localhost:9092"
-TOPIC = "acks_test"
-
-TOTAL_MESSAGES = 2000
-TARGET_RATE = 100
-
-
-# --------------------------------------------------
-# Argument parser
-# --------------------------------------------------
-
-parser = argparse.ArgumentParser()
-
-parser.add_argument(
-    "--acks",
-    required=True,
-    choices=["0", "1", "all"]
-)
-
-args = parser.parse_args()
-
-# Convert "0" and "1" into integers.
-# Keep "all" as a string.
-if args.acks in ["0", "1"]:
-    args.acks = int(args.acks)
+DEFAULT_TOPIC = "acks_test"
+DEFAULT_TOTAL_MESSAGES = 2000
+DEFAULT_TARGET_RATE = 200
 
 
-# --------------------------------------------------
-# Create Kafka Producer
-# --------------------------------------------------
-
-producer = KafkaProducer(
-    bootstrap_servers=[BROKER],
-    acks=args.acks,
-    retries=0,
-    linger_ms=0,
-    batch_size=16384,
-    request_timeout_ms=5000,
-    delivery_timeout_ms=7000,
-    value_serializer=lambda v: json.dumps(v).encode("utf-8")
-)
+def calculate_percentile(values, percentile):
+    if not values:
+        return 0.0
+    sorted_values = sorted(values)
+    index = int(percentile * len(sorted_values)) - 1
+    index = max(0, min(index, len(sorted_values) - 1))
+    return sorted_values[index]
 
 
-print("=" * 60)
-print("KAFKA ACKS EXPERIMENT")
-print("=" * 60)
-print(f"Broker          : {BROKER}")
-print(f"Topic           : {TOPIC}")
-print(f"ACKS            : {args.acks}")
-print(f"Total messages  : {TOTAL_MESSAGES}")
-print(f"Target rate     : {TARGET_RATE} tx/sec")
-print("=" * 60)
+def main():
+    parser = argparse.ArgumentParser(description="Kafka ACKS Durability & Latency Benchmark")
+    parser.add_argument("--acks", required=True, choices=["0", "1", "all"])
+    parser.add_argument("--topic", default=DEFAULT_TOPIC)
+    parser.add_argument("--count", type=int, default=DEFAULT_TOTAL_MESSAGES)
+    parser.add_argument("--rate", type=int, default=DEFAULT_TARGET_RATE)
+    parser.add_argument("--dataset", default="default")
 
+    args = parser.parse_args()
 
-# --------------------------------------------------
-# Experiment
-# --------------------------------------------------
+    ack_setting = 0 if args.acks == "0" else (1 if args.acks == "1" else "all")
+    streamer = DatasetTransactionStreamer(dataset_path=args.dataset, loop=True)
 
-latencies = []
+    producer = KafkaProducer(
+        bootstrap_servers=[BROKER],
+        acks=ack_setting,
+        retries=0,
+        linger_ms=0,
+        batch_size=16384,
+        request_timeout_ms=5000,
+        delivery_timeout_ms=7000,
+        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        key_serializer=lambda k: k.encode("utf-8"),
+    )
 
-successful = 0
-failed = 0
+    print("=" * 80)
+    print("KAFKA ACKS EXPERIMENT (DATASET-POWERED)")
+    print("=" * 80)
+    print(f"Broker          : {BROKER}")
+    print(f"Topic           : {args.topic}")
+    print(f"Dataset         : {streamer.dataset_file or 'Synthetic'}")
+    print(f"ACKS            : {args.acks}")
+    print(f"Total messages  : {args.count}")
+    print(f"Target rate     : {args.rate} tx/sec")
+    print("=" * 80)
+    print()
 
-experiment_start = time.perf_counter()
+    latencies = []
+    successful = 0
+    failed = 0
 
-next_send_time = experiment_start
+    experiment_start = time.perf_counter()
 
+    for i in range(1, args.count + 1):
+        target_send_time = experiment_start + ((i - 1) / args.rate)
+        sleep_time = target_send_time - time.perf_counter()
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
-for i in range(TOTAL_MESSAGES):
+        transaction = streamer.next_transaction()
+        key = str(transaction.get("card_id", "CARD-0"))
 
-    # Maintain approximately TARGET_RATE messages/sec
-    next_send_time = experiment_start + (i / TARGET_RATE)
+        start_time = time.perf_counter()
+        try:
+            future = producer.send(args.topic, key=key, value=transaction)
+            if args.acks != "0":
+                future.get(timeout=5)
+            end_time = time.perf_counter()
 
-    sleep_time = next_send_time - time.perf_counter()
-
-    if sleep_time > 0:
-        time.sleep(sleep_time)
-
-    message = {
-        "transaction_id": f"ACK-{args.acks}-{i}",
-        "amount": 100 + (i % 1000),
-        "merchant_id": f"M-{i % 100}",
-        "timestamp": time.time(),
-        "device_type": "mobile",
-        "country": "IN",
-        "is_fraud": 0
-    }
-
-    start = time.perf_counter()
-
-    try:
-
-        future = producer.send(
-            TOPIC,
-            value=message
-        )
-
-        if args.acks != 0:
-
-            metadata = future.get(timeout=5)
-
-            latency = (
-                time.perf_counter() - start
-            ) * 1000
-
-            latencies.append(latency)
-
+            latency_ms = (end_time - start_time) * 1000
+            latencies.append(latency_ms)
             successful += 1
 
-        else:
+            if i % 500 == 0 or i == args.count:
+                print(f"[{i}/{args.count}] TX={transaction['transaction_id']} | ACKS={args.acks} | Latency={latency_ms:.2f} ms")
 
-            # For acks=0, Kafka does not wait for acknowledgement.
-            latency = (
-                time.perf_counter() - start
-            ) * 1000
+        except Exception as error:
+            failed += 1
+            print(f"FAILED | TX={transaction['transaction_id']} | Error={error}")
 
-            latencies.append(latency)
+    producer.flush()
+    producer.close()
+    streamer.close()
 
-            successful += 1
+    total_duration = time.perf_counter() - experiment_start
+    actual_throughput = successful / total_duration if total_duration > 0 else 0
 
-    except Exception as e:
+    print()
+    print("=" * 80)
+    print("EXPERIMENT RESULTS")
+    print("=" * 80)
+    print(f"ACKS mode              : {args.acks}")
+    print(f"Successful messages    : {successful}")
+    print(f"Failed messages        : {failed}")
+    print(f"Total duration (s)     : {total_duration:.3f}")
+    print(f"Actual throughput      : {actual_throughput:.2f} msg/sec")
 
-        failed += 1
-
-        print(
-            f"Send failed for message {i}: "
-            f"{type(e).__name__}: {e}"
-        )
-
-
-# --------------------------------------------------
-# Flush and close
-# --------------------------------------------------
-
-producer.flush()
-producer.close()
-
-experiment_end = time.perf_counter()
-
-total_time = experiment_end - experiment_start
-
-
-# --------------------------------------------------
-# Results
-# --------------------------------------------------
-
-print()
-print("=" * 60)
-print("EXPERIMENT RESULTS")
-print("=" * 60)
-
-print(f"ACKS              : {args.acks}")
-print(f"Messages attempted: {TOTAL_MESSAGES}")
-print(f"Successful        : {successful}")
-print(f"Failed            : {failed}")
-
-if total_time > 0:
-    producer_rate = TOTAL_MESSAGES / total_time
-else:
-    producer_rate = 0
-
-print(f"Producer rate     : {producer_rate:.2f} tx/sec")
+    if latencies:
+        print()
+        print("Latency distribution (ms):")
+        print(f"  Min latency          : {min(latencies):.3f} ms")
+        print(f"  Avg latency          : {statistics.mean(latencies):.3f} ms")
+        print(f"  Median latency       : {statistics.median(latencies):.3f} ms")
+        print(f"  P95 latency          : {calculate_percentile(latencies, 0.95):.3f} ms")
+        print(f"  P99 latency          : {calculate_percentile(latencies, 0.99):.3f} ms")
+        print(f"  Max latency          : {max(latencies):.3f} ms")
+    print("=" * 80)
 
 
-if latencies:
-
-    average_latency = statistics.mean(latencies)
-    median_latency = statistics.median(latencies)
-
-    sorted_latencies = sorted(latencies)
-
-    p95_index = int(0.95 * len(sorted_latencies)) - 1
-    p99_index = int(0.99 * len(sorted_latencies)) - 1
-
-    p95_index = max(0, min(p95_index, len(sorted_latencies) - 1))
-    p99_index = max(0, min(p99_index, len(sorted_latencies) - 1))
-
-    p95_latency = sorted_latencies[p95_index]
-    p99_latency = sorted_latencies[p99_index]
-
-    print(f"Average latency   : {average_latency:.3f} ms")
-    print(f"Median latency    : {median_latency:.3f} ms")
-    print(f"P95 latency       : {p95_latency:.3f} ms")
-    print(f"P99 latency       : {p99_latency:.3f} ms")
-
-else:
-
-    print("Average latency   : N/A")
-    print("Median latency    : N/A")
-    print("P95 latency       : N/A")
-    print("P99 latency       : N/A")
-
-
-print(f"Messages lost     : {failed}")
-
-if failed == 0:
-    print("Result            : SUCCESS")
-else:
-    print("Result            : PARTIAL / FAILED")
-
-print("=" * 60)
+if __name__ == "__main__":
+    main()
